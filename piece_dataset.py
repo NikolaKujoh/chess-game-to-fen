@@ -85,62 +85,98 @@ class PieceClassificationDataset(Dataset):
         self.dataroot = Path(dataroot)
         self.split = split
         self.transform = transform
+        self.dataset_mode = "annotations"
 
-        # ── Load annotations ───────────────────────────────────────────────────
         ann_path = self.dataroot / "annotations.json"
-        if not ann_path.exists():
-            raise FileNotFoundError(f"annotations.json not found at {ann_path}")
+        split_dir = self.dataroot / self.split
+
+        if ann_path.exists():
+            self._init_from_annotations(ann_path, use_chessred2k_split)
+            return
+
+        if split_dir.is_dir():
+            self._init_from_piece_crops(split_dir)
+            return
+
+        raise FileNotFoundError(
+            f"Could not find supported dataset structure under {self.dataroot}. "
+            f"Expected either {ann_path} or split folder {split_dir}."
+        )
+
+    def _init_from_annotations(self, ann_path: Path, use_chessred2k_split: bool) -> None:
+        self.dataset_mode = "annotations"
 
         with open(ann_path, "r") as f:
             raw = json.load(f)
 
-        # Convert to pandas for easier filtering
         images_df = pd.DataFrame(raw["images"])
         pieces_df = pd.DataFrame(raw["annotations"]["pieces"])
         corners_df = pd.DataFrame(raw["annotations"]["corners"])
-
-        # ── Filter to ChessReD2K subset ────────────────────────────────────────
-        # Only images with corner annotations have bbox annotations (2,078 total)
         annotated_ids = set(corners_df["image_id"])
-        
+
         if use_chessred2k_split:
-            # Use the nested chessred2k split (70/15/15 on annotated subset)
             if "chessred2k" not in raw["splits"]:
                 raise KeyError("chessred2k split not found in annotations.json")
-            
-            split_info = raw["splits"]["chessred2k"][split]
+
+            split_info = raw["splits"]["chessred2k"][self.split]
             split_ids = set(split_info["image_ids"])
-            
-            # Intersection: only annotated images in this split
             valid_ids = annotated_ids & split_ids
         else:
-            # Use the main split but filter to annotated images
-            split_info = raw["splits"][split]
+            split_info = raw["splits"][self.split]
             split_ids = set(split_info["image_ids"])
             valid_ids = annotated_ids & split_ids
 
-        # ── Filter pieces to valid images ──────────────────────────────────────
         self.pieces = pieces_df[pieces_df["image_id"].isin(valid_ids)].copy()
-        
-        # Remove 'empty' class (category_id=12) - we only classify actual pieces
         self.pieces = self.pieces[self.pieces["category_id"] != 12].copy()
-        
-        # Build image metadata lookup
         self.images = images_df[images_df["id"].isin(valid_ids)].set_index("id")
-
-        # Reset index for clean iteration
         self.pieces = self.pieces.reset_index(drop=True)
 
-        print(f"[PieceClassificationDataset] {split} split:")
+        print(f"[PieceClassificationDataset] {self.split} split:")
         print(f"  {len(valid_ids)} images")
         print(f"  {len(self.pieces)} piece samples")
-        print(f"  Class distribution:")
+        print("  Class distribution:")
         for cat_id in sorted(self.pieces["category_id"].unique()):
             count = (self.pieces["category_id"] == cat_id).sum()
             name = CATEGORIES.get(cat_id, f"unknown-{cat_id}")
             print(f"    {cat_id:2d} {name:20s}: {count:5d} samples")
 
+    def _init_from_piece_crops(self, split_dir: Path) -> None:
+        self.dataset_mode = "piece_crops"
+
+        name_to_idx = {name: idx for idx, name in CATEGORIES.items()}
+        valid_suffixes = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+
+        self.samples = []
+        class_counts = {}
+
+        for class_name in sorted(name_to_idx.keys()):
+            class_dir = split_dir / class_name
+            if not class_dir.is_dir():
+                continue
+
+            label = name_to_idx[class_name]
+            image_paths = [
+                p for p in class_dir.iterdir()
+                if p.is_file() and p.suffix.lower() in valid_suffixes
+            ]
+            class_counts[class_name] = len(image_paths)
+            self.samples.extend((path, label) for path in image_paths)
+
+        if not self.samples:
+            raise RuntimeError(
+                f"No image samples found in {split_dir}. "
+                "Expected folders like train/white-pawn, train/black-king, etc."
+            )
+
+        print(f"[PieceClassificationDataset] {self.split} split (piece_crops mode):")
+        print(f"  {len(self.samples)} piece samples")
+        print("  Class distribution:")
+        for class_name in sorted(class_counts.keys()):
+            print(f"    {class_name:20s}: {class_counts[class_name]:5d} samples")
+
     def __len__(self) -> int:
+        if self.dataset_mode == "piece_crops":
+            return len(self.samples)
         return len(self.pieces)
 
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, int]:
@@ -149,6 +185,13 @@ class PieceClassificationDataset(Dataset):
             image: Tensor of shape (C, H, W) - the piece crop
             label: Integer category ID (0-11)
         """
+        if self.dataset_mode == "piece_crops":
+            img_path, label = self.samples[idx]
+            image = Image.open(img_path).convert("RGB")
+            if self.transform is not None:
+                image = self.transform(image)
+            return image, label
+
         row = self.pieces.iloc[idx]
         
         # ── Load full image ────────────────────────────────────────────────────
