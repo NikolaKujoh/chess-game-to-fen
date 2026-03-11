@@ -1,0 +1,14 @@
+project:
+  name: uci-har-activity-classification
+  random_state: 42
+
+data:
+  raw_dir: data/raw
+  processed_dir: data/processed
+
+training:
+  test_size: 0.2
+  cv_folds: 5
+  metrics:
+    - accuracy
+    - f1_macro
