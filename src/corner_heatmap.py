@@ -68,10 +68,17 @@ class HeatmapDataset(Dataset):
                 torch.tensor([W, Hh], dtype=torch.float32))
 
 
+BACKBONES = {
+    "resnet18": (models.resnet18, ResNet18_Weights.DEFAULT),
+    "resnet34": (models.resnet34, models.ResNet34_Weights.DEFAULT),
+}
+
+
 class HeatmapNet(nn.Module):
-    def __init__(self, n_deconv=4):
+    def __init__(self, n_deconv=4, backbone_name="resnet18"):
         super().__init__()
-        backbone = models.resnet18(weights=ResNet18_Weights.DEFAULT)
+        ctor, weights = BACKBONES[backbone_name]
+        backbone = ctor(weights=weights)
         self.encoder = nn.Sequential(
             backbone.conv1, backbone.bn1, backbone.relu, backbone.maxpool,
             backbone.layer1, backbone.layer2, backbone.layer3, backbone.layer4,
@@ -165,6 +172,8 @@ def main():
     ap.add_argument("--records", default="chesscog_parsed.json")
     ap.add_argument("--img-size", type=int, default=256)
     ap.add_argument("--n-deconv", type=int, default=4)
+    ap.add_argument("--backbone", choices=list(BACKBONES), default="resnet18",
+                    help="resnet34 = more capacity, usually a bit lower px error")
     ap.add_argument("--sigma", type=float, default=2.0)
     ap.add_argument("--batch-size", type=int, default=8)
     ap.add_argument("--freeze-epochs", type=int, default=3)
@@ -197,7 +206,7 @@ def main():
     test_loader = DataLoader(mk("test", False), batch_size=args.batch_size,
                              shuffle=False, num_workers=args.num_workers, pin_memory=True)
 
-    model = HeatmapNet(n_deconv=args.n_deconv).to(device)
+    model = HeatmapNet(n_deconv=args.n_deconv, backbone_name=args.backbone).to(device)
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
